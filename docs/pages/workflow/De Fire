@@ -1,0 +1,347 @@
+npm install adhan date-fns
+import React, { useEffect, useState, useRef } from "react";
+
+// De Fire - Single-file React app (mobile-first web app). 
+// Dependencies (install with npm/yarn):
+//  - adhan (for prayer times): npm install adhan
+//  - date-fns (for formatting): npm install date-fns
+//  - Tailwind CSS (optional - styles inlined for safety)
+
+// Please note: to get precise prayer times you must grant geolocation permission.
+// Browser notifications require Notification permission. For background/OS-level alarms
+// you'll need to wrap this in a native shell (Cordova / Capacitor / React Native).
+
+export default function DeFireApp() {
+  // clock
+  const [now, setNow] = useState(new Date());
+  const [prayerTimes, setPrayerTimes] = useState(null);
+  const [location, setLocation] = useState(null);
+  const [showSplash, setShowSplash] = useState(true);
+  const [isHaramTime, setIsHaramTime] = useState(false); // toggle to show Makkah time
+  const [tips] = useState([
+    "اللهم صل وسلم على رسولنا محمد",
+    "ذكر لله راحة للقلب",
+    "اقرأ آية من القرآن اليوم",
+    "ساعد إنسانًا بكلمة طيبة",
+    "استغفر الله في كل وقت"
+  ]);
+  const tipIndex = useRef(0);
+  const reminderIntervalRef = useRef(null);
+  const adhanAudioRef = useRef(null);
+
+  useEffect(() => {
+    // splash animation then hide
+    const t = setTimeout(() => setShowSplash(false), 1800);
+    return () => clearTimeout(t);
+  }, []);
+
+  useEffect(() => {
+    const interval = setInterval(() => setNow(new Date()), 1000);
+    return () => clearInterval(interval);
+  }, []);
+
+  useEffect(() => {
+    // try to get geolocation for prayer times
+    if (!navigator.geolocation) return;
+    navigator.geolocation.getCurrentPosition(
+      (pos) => {
+        setLocation({ lat: pos.coords.latitude, lng: pos.coords.longitude });
+      },
+      (err) => {
+        console.warn("geolocation error", err);
+      },
+      { enableHighAccuracy: false, maximumAge: 60 * 60 * 1000 }
+    );
+  }, []);
+
+  useEffect(() => {
+    // calculate prayer times when location available
+    if (!location) return;
+    // adhan library - dynamic import so app won't crash if not installed
+    (async () => {
+      try {
+        const adhan = await import('adhan');
+        const { default: adhanDefault, PrayerTimes, CalculationMethod, Madhab } = adhan;
+        const coords = new adhan.Defaults.Coordinates(location.lat, location.lng);
+        // choose calculation method automatically (here: Muslim World League fallback)
+        const params = adhan.CalculationMethod.MuslimWorldLeague();
+        params.madhab = adhan.Madhab.Shafi;
+        const date = new Date();
+        const times = new adhan.PrayerTimes(coords, date, params);
+        setPrayerTimes(times);
+      } catch (e) {
+        console.warn("Adhan library not available. Install 'adhan' to enable prayer times.", e);
+      }
+    })();
+  }, [location]);
+
+  useEffect(() => {
+    // prepare adhan audio (provide your own adhan.mp3 at public folder)
+    adhanAudioRef.current = new Audio('/adhan.mp3');
+  }, []);
+
+  // request notification permission once
+  useEffect(() => {
+    if ('Notification' in window && Notification.permission === 'default') {
+      Notification.requestPermission();
+    }
+  }, []);
+
+  // helper: show notification and optionally play sound
+  function showNotification(title, body, playSound = false) {
+    if ('Notification' in window && Notification.permission === 'granted') {
+      try {
+        new Notification(title, { body, icon: '/icon.png' });
+      } catch (e) {
+        console.warn('Notification failed', e);
+      }
+    }
+    if (playSound && adhanAudioRef.current) {
+      adhanAudioRef.current.play().catch(() => console.warn('audio play blocked'));
+    }
+  }
+
+  // schedule check for adhan times every 30 seconds
+  useEffect(() => {
+    if (!prayerTimes) return;
+    const check = () => {
+      const now = new Date();
+      const keys = ['fajr', 'dhuhr', 'asr', 'maghrib', 'isha'];
+      keys.forEach((k) => {
+        const t = prayerTimes[k];
+        if (!t) return;
+        // if current minute matches prayer minute and second < 30 -> trigger
+        if (
+          now.getHours() === t.getHours() &&
+          now.getMinutes() === t.getMinutes() &&
+          now.getSeconds() < 30
+        ) {
+          // it's prayer time
+          showNotification('الأذان — De Fire', `حان وقت ${k}`, true);
+          // start 5-minute reminders sequence for this prayer time
+          startFiveMinReminders(`هل صليت على رسول الله؟`);
+        }
+      });
+    };
+    check();
+    const id = setInterval(check, 30 * 1000);
+    return () => clearInterval(id);
+  }, [prayerTimes]);
+
+  function startFiveMinReminders(message) {
+    // clear any existing interval
+    if (reminderIntervalRef.current) {
+      clearInterval(reminderIntervalRef.current);
+    }
+    // immediately show first reminder
+    sendFiveMinReminder(message);
+    // then every 5 minutes (300000 ms)
+    reminderIntervalRef.current = setInterval(() => sendFiveMinReminder(message), 5 * 60 * 1000);
+  }
+
+  function sendFiveMinReminder(message) {
+    // rotate tip
+    const tip = tips[tipIndex.current % tips.length];
+    tipIndex.current += 1;
+    showNotification('تذكير من De Fire', `${message}\n
+${tip}`);
+  }
+
+  // simple helper to format time in HH:MM:SS
+  function formatTime(d) {
+    return d.toLocaleTimeString();
+  }
+
+  // compute Makkah time optionally
+  function makkahTime(date) {
+    // Makkah timezone is UTC+3. We'll compute by shifting to UTC then +3.
+    const utc = date.getTime() + date.getTimezoneOffset() * 60000;
+    const makkah = new Date(utc + 3 * 3600000);
+    return makkah;
+  }
+
+  return (
+    <div className="min-h-screen flex items-center justify-center bg-gradient-to-b from-gray-900 to-gray-800 text-white p-4" style={{fontFamily: 'TheSans, sans-serif'}}>
+      {showSplash ? (
+        <div className="flex flex-col items-center justify-center space-y-4">
+          <div className="text-3xl font-bold animate-pulse">السلام عليكم</div>
+          <div className="text-lg">رامي منير الوصابي</div>
+          <div className="w-32 h-32 rounded-full bg-white/10 flex items-center justify-center">
+            <div className="text-xl">De Fire</div>
+          </div>
+        </div>
+      ) : (
+        <div className="w-full max-w-md bg-white/5 rounded-2xl p-6 shadow-2xl">
+          <header className="flex items-center justify-between">
+            <div>
+              <h1 className="text-2xl font-semibold">De Fire</h1>
+              <p className="text-sm opacity-80">تطبيق إسلامي — تذكيرات الأذان والنوافل</p>
+            </div>
+            <div className="text-right text-xs opacity-80">
+              <div>{formatTime(now)}</div>
+              <div className="mt-1 text-[13px]">{isHaramTime ? makkahTime(now).toLocaleTimeString() + ' (وقت الحرم)' : ''}</div>
+            </div>
+          </header>
+
+          <main className="mt-6 space-y-4">
+            <div className="rounded-lg p-4 bg-white/6">
+              <div className="flex items-center justify-between">
+                <div>
+                  <div className="text-sm opacity-80">التوقيت الحالي</div>
+                  <div className="text-xl font-medium">{formatTime(now)}</div>
+                </div>
+                <div>
+                  <button className="px-3 py-1 bg-white/8 rounded-lg text-sm" onClick={() => setIsHaramTime(!isHaramTime)}>
+                    {isHaramTime ? 'إخفاء وقت الحرم' : 'عرض وقت الحرم'}
+                  </button>
+                </div>
+              </div>
+            </div>
+
+            <div className="rounded-lg p-4 bg-white/6">
+              <div className="text-sm opacity-80">أوقات الصلاة (اليوم)</div>
+              {prayerTimes ? (
+                <ul className="mt-2 space-y-1 text-sm">
+                  <li>الفجر: {prayerTimes.fajr.toLocaleTimeString()}</li>
+                  <li>الظهر: {prayerTimes.dhuhr.toLocaleTimeString()}</li>
+                  <li>العصر: {prayerTimes.asr.toLocaleTimeString()}</li>
+                  <li>المغرب: {prayerTimes.maghrib.toLocaleTimeString()}</li>
+                  <li>العشاء: {prayerTimes.isha.toLocaleTimeString()}</li>
+                </ul>
+              ) : (
+                <div className="mt-2 text-sm opacity-70">أعطني إذن الوصول للموقع لحساب أوقات الصلاة بدقة.</div>
+              )}
+            </div>
+
+            <div className="rounded-lg p-4 bg-white/6">
+              <div className="flex items-center justify-between">
+                <div className="text-sm">تحكم التذكير اليدوي</div>
+                <div>
+                  <button
+                    className="px-3 py-1 bg-white/8 rounded-lg text-sm"
+                    onClick={() => startFiveMinReminders('هل صليت على رسول الله؟')}
+                  >
+                    بدء تذكيرات 5 دقائق
+                  </button>
+                </div>
+              </div>
+              <p className="text-xs opacity-80 mt-2">بعد الضغط سيصلك تذكير كل 5 دقائق بسؤال: هل صليت على رسول الله؟ولإيقاف أعد تحميل الصفحة أو أغلق التطبيق.</p>
+            </div>
+
+            <div className="rounded-lg p-4 bg-white/6 text-center">
+              <div className="text-sm opacity-80">نصيحة سريعة</div>
+              <div className="mt-2 text-base">{tips[(tipIndex.current) % tips.length]}</div>
+            </div>
+          </main>
+
+          <footer className="mt-6 text-xs opacity-70 text-center">De Fire — تصميم مريح للعيون • رامي منير الوصابي</footer>
+        </div>
+      )}
+    </div>
+  );
+}
+import React, { useEffect, useState, useRef } from "react";
+
+// De Fire - نسخة مع صوت مؤذن الحرم
+export default function DeFireApp() {
+  const [now, setNow] = useState(new Date());
+  const adhanAudioRef = useRef(null);
+
+  useEffect(() => {
+    const interval = setInterval(() => setNow(new Date()), 1000);
+    return () => clearInterval(interval);
+  }, []);
+
+  // تحميل صوت الأذان (مؤذن الحرم)
+  useEffect(() => {
+    // ضع ملف "adhan_haram.mp3" في مجلد public
+    adhanAudioRef.current = new Audio("/adhan_haram.mp3");
+  }, []);
+
+  // تشغيل الأذان
+  function playAdhan() {
+    if (adhanAudioRef.current) {
+      adhanAudioRef.current.play().catch(() => {
+        console.warn("المتصفح حجب تشغيل الصوت، اضغط على الشاشة للسماح بالصوت");
+      });
+    }
+  }
+
+  // إشعار عند الأذان
+  function showNotification() {
+    if ("Notification" in window && Notification.permission === "granted") {
+      new Notification("الأذان — De Fire", {
+        body: "حان وقت الصلاة 🕌",
+        icon: "/icon.png",
+      });
+    }
+  }
+
+  // طلب إذن الإشعارات
+  useEffect(() => {
+    if ("Notification" in window && Notification.permission === "default") {
+      Notification.requestPermission();
+    }
+  }, []);
+
+  return (
+    <div className="min-h-screen flex items-center justify-center bg-gradient-to-b from-emerald-900 to-sky-900 text-white p-4">
+      <div className="w-full max-w-md bg-white/10 backdrop-blur-md rounded-2xl p-6 shadow-2xl text-center">
+        
+        {/* شاشة ترحيبية */}
+        <h1 className="text-3xl font-bold mb-2 animate-pulse">السلام عليكم</h1>
+        <p className="opacity-90 mb-4">أهلاً بك رامي منير الوصابي 🌙</p>
+
+        {/* الساعة */}
+        <div className="text-5xl font-mono mb-6">{now.toLocaleTimeString()}</div>
+
+        {/* زر تجربة الأذان */}
+        <button
+          onClick={() => {
+            playAdhan();
+            showNotification();
+          }}
+          className="px-6 py-3 rounded-2xl bg-emerald-600 hover:bg-emerald-700 transition text-lg font-semibold shadow-md"
+        >
+          ▶️ تشغيل الأذان
+        </button>
+
+        {/* ملاحظات */}
+        <p className="mt-6 text-sm opacity-70">
+          عند وقت الصلاة سيعمل الأذان بصوت مؤذن الحرم مع إشعار 🕌
+        </p>
+
+        <footer className="mt-6 text-xs opacity-60">
+          De Fire • لمسات مريحة للعيون ✨
+        </footer>
+      </div>
+    </div>
+  );
+}
+name: PR Auto Comment
+
+on:
+  pull_request: {}
+
+jobs:
+  # build_ios, build_android, and publish_update jobs
+
+  comment_on_pr:
+    name: Post Results to PR
+    after: [build_ios, build_android, publish_update]
+    type: github-commentname: Custom Build Report
+
+jobs:
+  # build_ios, build_android, and publish_update jobs
+
+  custom_comment:
+    name: Post Custom Report
+    after: [build_ios, build_android, publish_update]
+    type: github-comment
+    params:
+      message: "🎉 Preview builds are ready! Please test these changes before approving the PR."
+      build_ids:
+        - ${{ after.build_ios.outputs.build_id }}
+        - ${{ after.build_android.outputs.build_id }}
+      update_group_ids:
+        - ${{ after.publish_update.outputs.first_update_group_id }}npm install adhan date-fns
